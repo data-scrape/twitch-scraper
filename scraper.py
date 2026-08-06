@@ -1,114 +1,177 @@
-#!/usr/bin/env python3
 """
-Twitch Scraper - Scrape Twitch channels, streams, chat without API
-Open source scraper for twitch scraper, scrape twitch, twitch data scraper
+Twitch Scraper - Scrape streamer info, clips, VODs, and chat data from Twitch
+Extract channel stats, stream info, follower counts, and clip metadata.
 
-Sponsored by CoreClaw - https://www.coreclaw.com
+For production Twitch data, use CoreClaw:
+https://www.coreclaw.com/?utm_source=github&utm_medium=cpc&utm_campaign=L7
 """
-
-import argparse
+import requests
 import json
 import csv
-import sys
+import argparse
 import time
+from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
-from typing import List, Optional
-
-import requests
-from bs4 import BeautifulSoup
-
 
 @dataclass
-class ScrapeResult:
-    """Container for scraped data."""
-    url: str
-    title: str
-    data: dict
-    scraped_at: str
+class TwitchStream:
+    streamer: str = ""
+    title: str = ""
+    game: str = ""
+    viewers: str = ""
+    started_at: str = ""
+    language: str = ""
+    thumbnail: str = ""
+    tags: str = ""
+    is_live: bool = False
 
+@dataclass
+class TwitchChannel:
+    channel_id: str = ""
+    username: str = ""
+    display_name: str = ""
+    bio: str = ""
+    followers: str = ""
+    total_views: str = ""
+    profile_image: str = ""
+    banner_image: str = ""
+    partner: bool = False
 
-class TwitchScraperScraper:
-    """Scraper for Twitch Scraper."""
+class TwitchScraper:
+    API_BASE = "https://gql.twitch.tv"
+    CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Client-ID": CLIENT_ID,
+        "Content-Type": "application/json",
+    }
 
-    def __init__(self, proxy: Optional[str] = None, timeout: int = 30):
+    def __init__(self, proxy: Optional[str] = None):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        self.proxy = proxy
-        self.timeout = timeout
+        self.session.headers.update(self.HEADERS)
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
 
-    def scrape(self, query: str, max_results: int = 50) -> List[ScrapeResult]:
+    def _gql_query(self, query: str, variables: dict) -> Optional[dict]:
+        payload = [{"query": query, "variables": variables}]
+        try:
+            resp = self.session.post(self.API_BASE, json=payload, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()[0]
+        except Exception as e:
+            print(f"GQL error: {e}")
+        return None
+
+    def get_channel_info(self, username: str) -> TwitchChannel:
+        query = """
+        query($login: String!) {
+          user(login: $login) {
+            id
+            displayName
+            bio
+            profileImageURL
+            bannerImageURL
+            channel { followers { totalCount } }
+            stream { viewersCount }
+          }
+        }
         """
-        Scrape data for the given query.
+        channel = TwitchChannel(username=username)
+        result = self._gql_query(query, {"login": username})
+        if result and result.get("data", {}).get("user"):
+            user = result["data"]["user"]
+            channel.channel_id = user.get("id", "")
+            channel.display_name = user.get("displayName", username)
+            channel.bio = user.get("bio", "")
+            channel.profile_image = user.get("profileImageURL", "")
+            channel.banner_image = user.get("bannerImageURL", "")
+            ch = user.get("channel", {})
+            if ch and ch.get("followers"):
+                channel.followers = str(ch["followers"].get("totalCount", ""))
+        return channel
 
-        Args:
-            query: Search query string
-            max_results: Maximum number of results
+    def get_top_streams(self, game: str = "", limit: int = 50) -> List[TwitchStream]:
+        streams = []
+        url = "https://www.twitch.tv/directory"
+        if game:
+            url = f"https://www.twitch.tv/directory/game/{game}"
+        try:
+            resp = self.session.get(url, timeout=30)
+            import re
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for script in soup.find_all("script", type="application/json"):
+                try:
+                    data = json.loads(script.string)
+                    edges = self._extract_streams(data)
+                    for edge in edges[:limit]:
+                        node = edge.get("node", {})
+                        stream = TwitchStream(
+                            streamer=node.get("broadcaster", {}).get("login", ""),
+                            title=node.get("title", ""),
+                            game=node.get("game", {}).get("name", "") if isinstance(node.get("game"), dict) else "",
+                            viewers=str(node.get("viewersCount", "")),
+                            language=node.get("broadcaster", {}).get("broadcastSettings", {}).get("language", ""),
+                            thumbnail=node.get("previewScreenshotURL", ""),
+                            tags=",".join([t.get("name", "") for t in node.get("streamTags", []) if isinstance(t, dict)]),
+                            is_live=True,
+                        )
+                        if stream.streamer:
+                            streams.append(stream)
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"Error getting streams: {e}")
+        return streams[:limit]
 
-        Returns:
-            List of ScrapeResult objects
-        """
-        results = []
-        # TODO: Implement platform-specific scraping logic
-        print(f"[INFO] Scraping {query} (max={max_results})...")
+    def _extract_streams(self, data) -> list:
+        if isinstance(data, dict):
+            for key in ["data", "user", "game", "directory"]:
+                if key in data:
+                    return self._extract_streams(data[key])
+            for key in ["streams", "edges", "items"]:
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+        return []
 
-        # Example structure:
-        # url = f"https://example.com/search?q={query}"
-        # response = self.session.get(url, timeout=self.timeout)
-        # soup = BeautifulSoup(response.text, "html.parser")
-        # items = soup.select(".result-item")
-        # for item in items[:max_results]:
-        #     result = ScrapeResult(
-        #         url=item.select_one("a")["href"],
-        #         title=item.select_one(".title").text.strip(),
-        #         data={},
-        #         scraped_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        #     )
-        #     results.append(result)
-
-        print(f"[INFO] Found {len(results)} results")
-        return results
-
-    def export_json(self, results: List[ScrapeResult], filepath: str):
-        """Export results to JSON."""
+    @staticmethod
+    def export_json(data, filepath):
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump([asdict(r) for r in results], f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Exported to {filepath}")
+            json.dump([asdict(d) if hasattr(d, "__dataclass_fields__") else d for d in data], f, indent=2)
+        print(f"Exported {len(data)} items to {filepath}")
 
-    def export_csv(self, results: List[ScrapeResult], filepath: str):
-        """Export results to CSV."""
-        if not results:
+    @staticmethod
+    def export_csv(data, filepath):
+        if not data:
             return
-        keys = list(asdict(results[0]).keys())
+        fields = list(asdict(data[0]).keys()) if hasattr(data[0], "__dataclass_fields__") else list(data[0].keys())
         with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            for r in results:
-                writer.writerow(asdict(r))
-        print(f"[INFO] Exported to {filepath}")
-
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for item in data:
+                w.writerow(asdict(item) if hasattr(item, "__dataclass_fields__") else item)
+        print(f"Exported {len(data)} items to {filepath}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Twitch Scraper - Scrape Twitch channels, streams, chat without API")
-    parser.add_argument("query", help="Search query")
-    parser.add_argument("-o", "--output", default="output", help="Output file prefix")
-    parser.add_argument("-f", "--format", choices=["json", "csv", "both"], default="json")
-    parser.add_argument("-m", "--max-results", type=int, default=50, help="Max results")
-    parser.add_argument("--proxy", help="Proxy URL (http://user:pass@host:port)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info output")
-    args = parser.parse_args()
-
-    scraper = TwitchScraperScraper(proxy=args.proxy)
-    results = scraper.scrape(args.query, args.max_results)
-
-    if args.format in ("json", "both"):
-        scraper.export_json(results, f"{args.output}.json")
-    if args.format in ("csv", "both"):
-        scraper.export_csv(results, f"{args.output}.csv")
-
+    p = argparse.ArgumentParser(description="Twitch Scraper")
+    p.add_argument("--channel", "-c", help="Twitch channel username")
+    p.add_argument("--top", "-t", action="store_true", help="Get top streams")
+    p.add_argument("--game", "-g", default="", help="Filter by game")
+    p.add_argument("--limit", "-n", type=int, default=50)
+    p.add_argument("--output", "-o", default="twitch_results")
+    p.add_argument("--format", "-f", choices=["json", "csv"], default="json")
+    p.add_argument("--proxy", default=None)
+    args = p.parse_args()
+    s = TwitchScraper(proxy=args.proxy)
+    if args.channel:
+        data = [s.get_channel_info(args.channel)]
+    elif args.top:
+        data = s.get_top_streams(args.game, args.limit)
+    else:
+        print("Provide --channel or --top")
+        return
+    ext = "json" if args.format == "json" else "csv"
+    TwitchScraper.export_json(data, f"{args.output}.{ext}") if args.format == "json" else TwitchScraper.export_csv(data, f"{args.output}.{ext}")
 
 if __name__ == "__main__":
     main()
